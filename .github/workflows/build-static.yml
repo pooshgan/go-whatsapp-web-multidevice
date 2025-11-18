@@ -1,0 +1,67 @@
+# .github/workflows/build-static.yml
+name: Build Static WhatsApp Binary (Manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      go-arch:
+        description: 'Target architecture'
+        required: true
+        default: 'amd64'
+        type: choice
+        options: [amd64, arm64]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and Export Binary
+        run: |
+          # ساختن builder container
+          docker buildx build \
+            --platform linux/${{ inputs.go-arch }} \
+            --target builder \
+            --file static.Dockerfile \
+            --tag whatsapp-builder:latest \
+            --load \
+            .
+
+          # ساختن container موقت
+          CONTAINER_ID=$(docker create whatsapp-builder:latest)
+
+          # کپی فایل باینری به خارج
+          mkdir -p ./artifacts
+          docker cp $CONTAINER_ID:/app/whatsapp ./artifacts/whatsapp-linux-${{ inputs.go-arch }}
+
+          # حذف container موقت
+          docker rm $CONTAINER_ID
+
+      - name: Verify Static Build
+        run: |
+          echo "=== File Info ==="
+          file ./artifacts/whatsapp-linux-${{ inputs.go-arch }}
+          echo "=== ldd Check (in Alpine) ==="
+          docker run --rm \
+            --platform linux/${{ inputs.go-arch }} \
+            -v "$(pwd)/artifacts:/artifacts" \
+            alpine:3.20 \
+            sh -c "apk add --no-cache file && file /artifacts/whatsapp-linux-${{ inputs.go-arch }} || echo 'OK'"
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: whatsapp-linux-${{ inputs.go-arch }}-static
+          path: ./artifacts/whatsapp-linux-${{ inputs.go-arch }}
+          if-no-files-found: error
