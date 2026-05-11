@@ -37,6 +37,7 @@ func (service serviceChat) ListChats(ctx context.Context, request domainChat.Lis
 		Offset:     request.Offset,
 		SearchName: request.Search,
 		HasMedia:   request.HasMedia,
+		IsArchived: request.Archived,
 	}
 
 	// Get chats from storage
@@ -46,8 +47,8 @@ func (service serviceChat) ListChats(ctx context.Context, request domainChat.Lis
 		return response, err
 	}
 
-	// Get total count for pagination
-	totalCount, err := service.chatStorageRepo.GetTotalChatCount()
+	// Get total count for pagination (with same filters for accuracy)
+	totalCount, err := service.chatStorageRepo.GetFilteredChatCount(filter)
 	if err != nil {
 		logrus.WithError(err).Error("Failed to get total chat count")
 		// Continue with partial data
@@ -64,6 +65,7 @@ func (service serviceChat) ListChats(ctx context.Context, request domainChat.Lis
 			EphemeralExpiration: chat.EphemeralExpiration,
 			CreatedAt:           chat.CreatedAt.Format(time.RFC3339),
 			UpdatedAt:           chat.UpdatedAt.Format(time.RFC3339),
+			Archived:            chat.Archived,
 		}
 		chatInfos = append(chatInfos, chatInfo)
 	}
@@ -92,8 +94,12 @@ func (service serviceChat) GetChatMessages(ctx context.Context, request domainCh
 		return response, err
 	}
 
-	// Get chat info first
-	chat, err := service.chatStorageRepo.GetChat(request.ChatJID)
+	deviceID := deviceIDFromContext(ctx)
+	if deviceID == "" {
+		return response, fmt.Errorf("device identification required")
+	}
+
+	chat, err := service.chatStorageRepo.GetChatByDevice(deviceID, request.ChatJID)
 	if err != nil {
 		logrus.WithError(err).WithField("chat_jid", request.ChatJID).Error("Failed to get chat info")
 		return response, err
@@ -132,13 +138,14 @@ func (service serviceChat) GetChatMessages(ctx context.Context, request domainCh
 	var messages []*domainChatStorage.Message
 	if request.Search != "" {
 		// Use search functionality if search query is provided
-		messages, err = service.chatStorageRepo.SearchMessages(request.ChatJID, request.Search, request.Limit)
+		messages, err = service.chatStorageRepo.SearchMessages(deviceID, request.ChatJID, request.Search, request.Limit)
 		if err != nil {
 			logrus.WithError(err).WithField("chat_jid", request.ChatJID).Error("Failed to search messages")
 			return response, err
 		}
 	} else {
-		// Use regular filter
+		// Use regular filter with device_id for data isolation
+		filter.DeviceID = deviceID
 		messages, err = service.chatStorageRepo.GetMessages(filter)
 		if err != nil {
 			logrus.WithError(err).WithField("chat_jid", request.ChatJID).Error("Failed to get messages")
@@ -158,18 +165,19 @@ func (service serviceChat) GetChatMessages(ctx context.Context, request domainCh
 	messageInfos := make([]domainChat.MessageInfo, 0, len(messages))
 	for _, message := range messages {
 		messageInfo := domainChat.MessageInfo{
-			ID:         message.ID,
-			ChatJID:    message.ChatJID,
-			SenderJID:  message.Sender,
-			Content:    message.Content,
-			Timestamp:  message.Timestamp.Format(time.RFC3339),
-			IsFromMe:   message.IsFromMe,
-			MediaType:  message.MediaType,
-			Filename:   message.Filename,
-			URL:        message.URL,
-			FileLength: message.FileLength,
-			CreatedAt:  message.CreatedAt.Format(time.RFC3339),
-			UpdatedAt:  message.UpdatedAt.Format(time.RFC3339),
+			ID:           message.ID,
+			ChatJID:      message.ChatJID,
+			SenderJID:    message.Sender,
+			Content:      message.Content,
+			Timestamp:    message.Timestamp.Format(time.RFC3339),
+			IsFromMe:     message.IsFromMe,
+			MediaType:    message.MediaType,
+			CallMetadata: message.CallMetadata,
+			Filename:     message.Filename,
+			URL:          message.URL,
+			FileLength:   message.FileLength,
+			CreatedAt:    message.CreatedAt.Format(time.RFC3339),
+			UpdatedAt:    message.UpdatedAt.Format(time.RFC3339),
 		}
 		messageInfos = append(messageInfos, messageInfo)
 	}
@@ -182,6 +190,7 @@ func (service serviceChat) GetChatMessages(ctx context.Context, request domainCh
 		EphemeralExpiration: chat.EphemeralExpiration,
 		CreatedAt:           chat.CreatedAt.Format(time.RFC3339),
 		UpdatedAt:           chat.UpdatedAt.Format(time.RFC3339),
+		Archived:            chat.Archived,
 	}
 
 	// Create pagination response
@@ -288,7 +297,7 @@ func (service serviceChat) SetDisappearingTimer(ctx context.Context, request dom
 	}
 
 	// Update local storage immediately for consistency
-	if existingChat, _ := service.chatStorageRepo.GetChat(request.ChatJID); existingChat != nil {
+	if existingChat, _ := service.chatStorageRepo.GetChatByDevice(deviceIDFromContext(ctx), request.ChatJID); existingChat != nil {
 		existingChat.EphemeralExpiration = request.TimerSeconds
 		_ = service.chatStorageRepo.StoreChat(existingChat)
 	}
@@ -308,6 +317,59 @@ func (service serviceChat) SetDisappearingTimer(ctx context.Context, request dom
 		"chat_jid":      request.ChatJID,
 		"timer_seconds": request.TimerSeconds,
 	}).Info("Disappearing timer set successfully")
+
+	return response, nil
+}
+
+func (service serviceChat) ArchiveChat(ctx context.Context, request domainChat.ArchiveChatRequest) (response domainChat.ArchiveChatResponse, err error) {
+	if err = validations.ValidateArchiveChat(ctx, &request); err != nil {
+		return response, err
+	}
+
+	client := whatsapp.ClientFromContext(ctx)
+	if client == nil {
+		return response, pkgError.ErrWaCLI
+	}
+
+	// Validate JID and ensure connection
+	targetJID, err := utils.ValidateJidWithLogin(client, request.ChatJID)
+	if err != nil {
+		return response, err
+	}
+
+	// Build archive patch using whatsmeow's BuildArchive
+	patchInfo := appstate.BuildArchive(targetJID, request.Archived, time.Now(), nil)
+
+	// Send app state update
+	if err = client.SendAppState(ctx, patchInfo); err != nil {
+		logrus.WithError(err).WithFields(logrus.Fields{
+			"chat_jid": request.ChatJID,
+			"archived": request.Archived,
+		}).Error("Failed to send archive chat app state")
+		return response, err
+	}
+
+	// Build response
+	response.Status = "success"
+	response.ChatJID = request.ChatJID
+	response.Archived = request.Archived
+
+	if request.Archived {
+		response.Message = "Chat archived successfully"
+	} else {
+		response.Message = "Chat unarchived successfully"
+	}
+
+	// Update local storage immediately for consistency
+	if existingChat, _ := service.chatStorageRepo.GetChatByDevice(deviceIDFromContext(ctx), request.ChatJID); existingChat != nil {
+		existingChat.Archived = request.Archived
+		_ = service.chatStorageRepo.StoreChat(existingChat)
+	}
+
+	logrus.WithFields(logrus.Fields{
+		"chat_jid": request.ChatJID,
+		"archived": request.Archived,
+	}).Info("Chat archive operation completed successfully")
 
 	return response, nil
 }

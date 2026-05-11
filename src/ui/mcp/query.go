@@ -10,6 +10,7 @@ import (
 	domainMessage "github.com/aldinokemal/go-whatsapp-web-multidevice/domains/message"
 	domainUser "github.com/aldinokemal/go-whatsapp-web-multidevice/domains/user"
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/pkg/utils"
+	mcpHelpers "github.com/aldinokemal/go-whatsapp-web-multidevice/ui/mcp/helpers"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
@@ -33,6 +34,7 @@ func (h *QueryHandler) AddQueryTools(mcpServer *server.MCPServer) {
 	mcpServer.AddTool(h.toolListChats(), h.handleListChats)
 	mcpServer.AddTool(h.toolGetChatMessages(), h.handleGetChatMessages)
 	mcpServer.AddTool(h.toolDownloadMedia(), h.handleDownloadMedia)
+	mcpServer.AddTool(h.toolArchiveChat(), h.handleArchiveChat)
 }
 
 func (h *QueryHandler) toolListContacts() mcp.Tool {
@@ -47,6 +49,11 @@ func (h *QueryHandler) toolListContacts() mcp.Tool {
 }
 
 func (h *QueryHandler) handleListContacts(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	ctx, err := mcpHelpers.ContextWithDefaultDevice(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	resp, err := h.userService.MyListContacts(ctx)
 	if err != nil {
 		return nil, err
@@ -83,6 +90,11 @@ func (h *QueryHandler) toolListChats() mcp.Tool {
 }
 
 func (h *QueryHandler) handleListChats(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	ctx, err := mcpHelpers.ContextWithDefaultDevice(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	var hasMedia bool
 	args := request.GetArguments()
 	if args != nil {
@@ -156,6 +168,11 @@ func (h *QueryHandler) toolGetChatMessages() mcp.Tool {
 }
 
 func (h *QueryHandler) handleGetChatMessages(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	ctx, err := mcpHelpers.ContextWithDefaultDevice(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	chatJID, err := request.RequireString("chat_jid")
 	if err != nil {
 		return nil, err
@@ -241,6 +258,11 @@ func (h *QueryHandler) toolDownloadMedia() mcp.Tool {
 }
 
 func (h *QueryHandler) handleDownloadMedia(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	ctx, err := mcpHelpers.ContextWithDefaultDevice(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	messageID, err := request.RequireString("message_id")
 	if err != nil {
 		return nil, err
@@ -284,4 +306,63 @@ func toBool(value any) (bool, error) {
 	default:
 		return false, fmt.Errorf("unsupported boolean value type %T", value)
 	}
+}
+
+func (h *QueryHandler) toolArchiveChat() mcp.Tool {
+	return mcp.NewTool(
+		"whatsapp_archive_chat",
+		mcp.WithDescription("Archive or unarchive a WhatsApp chat. Archived chats are hidden from the main chat list."),
+		mcp.WithTitleAnnotation("Archive/Unarchive Chat"),
+		mcp.WithReadOnlyHintAnnotation(false),
+		mcp.WithDestructiveHintAnnotation(false),
+		mcp.WithIdempotentHintAnnotation(true),
+		mcp.WithString("chat_jid",
+			mcp.Description("The chat JID (e.g., 628123456789@s.whatsapp.net or group@g.us)."),
+			mcp.Required(),
+		),
+		mcp.WithBoolean("archived",
+			mcp.Description("Set to true to archive the chat, false to unarchive it."),
+			mcp.Required(),
+		),
+	)
+}
+
+func (h *QueryHandler) handleArchiveChat(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	ctx, err := mcpHelpers.ContextWithDefaultDevice(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	chatJID, err := request.RequireString("chat_jid")
+	if err != nil {
+		return nil, err
+	}
+
+	args := request.GetArguments()
+	if args == nil {
+		return nil, fmt.Errorf("missing required argument: archived")
+	}
+
+	archivedValue, ok := args["archived"]
+	if !ok {
+		return nil, fmt.Errorf("missing required argument: archived")
+	}
+
+	archived, err := toBool(archivedValue)
+	if err != nil {
+		return nil, err
+	}
+
+	req := domainChat.ArchiveChatRequest{
+		ChatJID:  chatJID,
+		Archived: archived,
+	}
+
+	resp, err := h.chatService.ArchiveChat(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	fallback := resp.Message
+	return mcp.NewToolResultStructured(resp, fallback), nil
 }

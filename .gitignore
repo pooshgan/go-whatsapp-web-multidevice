@@ -14,3 +14,6 @@ bin
 .cursor/mcp.json
 .factory
 .vscode/settings.json
+src/whatsapp
+.worktrees/
+src/gowa
