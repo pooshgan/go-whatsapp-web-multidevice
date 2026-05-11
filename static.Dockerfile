@@ -1,6 +1,6 @@
 # static.Dockerfile
 # فقط برای بیلد استاتیک — بدون مرحله دوم
-FROM golang:1.24-alpine3.20 AS builder
+FROM golang:1.25-alpine3.23 AS builder
 
 # ابزارهای لازم برای CGO + SQLite + استاتیک
 RUN apk update && apk add --no-cache gcc musl-dev
